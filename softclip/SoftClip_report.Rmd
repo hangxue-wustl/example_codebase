@@ -1,0 +1,76 @@
+---
+title: "Soft Clip Report"
+output:
+  html_document:
+    theme: readable
+    toc: TRUE
+    toc_depth: 3
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    number_sections: TRUE
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params: 
+  run:  
+  s3_dir:
+  omit:
+  report_threshold: 
+  output_dir: 'default'
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DT)
+
+```
+
+```{r,include = FALSE}
+base = "https:/XXX"
+aws_base = "https:/XXX"
+output = paste0(aws_base,params$s3_dir, "/")
+multiqc = paste0(base,params$s3_dir,"/summary/", params$job,"_multiqc_report.html")
+report = paste0(base,params$s3_dir,"/summary/sv_report.html")
+
+```
+```{r load-packages, include=FALSE}
+library(knitr)
+library(DT)
+Sys.setenv("RSTUDIO_PANDOC"="XXXX")
+```
+SoftClip results for **`r params$run`**. 
+
+Output: reports, tables, logs, and more available on S3 <a href=`r output` target="_blank">here</a>.
+
+# Experiment Parameters
+
+**Samples:**
+```{r, echo=FALSE}
+samples <- read.csv(file = 'samples.csv')
+knitr::kable(samples,row.names = FALSE,  col.names = gsub("[.]", " ", names(samples)))
+
+      
+```
+
+## Table of soft clipped counts
+*Count for each position that has been soft clipped. Soft clipped count peak is called by scipy.signal after smmoothing the curve using savgol_filter. The peak threshold is prominence = avg/2. A threshold of **`r params$report_threshold`**% is used.*
+```{r,echo=FALSE}
+soft_clipped_df <- read.csv(file = 'results/soft_clipped_peak_df.csv')[ ,3:9]
+if(nrow(soft_clipped_df)>0){
+  datatable(soft_clipped_df)
+# knitr::kable(soft_clipped_df,row.names = FALSE, col.names = gsub("[.]", " ", names(soft_clipped_df)))
+}else{
+    cat("No significant soft clipped position peaks found. \n")
+  }
+
+```
+# Soft Clip Graphs
+*Regions that are heavily soft clipped are indicative of structural variants.
+```{r,echo=FALSE,results= "asis"}
+for(lib in samples$Libraries){
+  label = samples[which(samples$Libraries == lib),]
+  cat("  \n##",  lib," ",label[,3], "  \n")
+  image_name = paste0('results/',lib, '_soft_clipped_pct.png')
+  cat("  \n", "![", image_name, "](", image_name, ")", "  \n",sep="")
+}
+```

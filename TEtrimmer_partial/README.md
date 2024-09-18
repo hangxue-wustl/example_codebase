@@ -1,0 +1,1 @@
+This repo contains some codes that are part of a complete software tool. I selected some codes here and I am the primary author of these selected codes. The complete repo for TEtrimmer is at https://github.com/qjiangzhao/TEtrimmer/tree/main

@@ -1,0 +1,179 @@
+import pandas as pd
+import numpy as np
+from sklearn.decomposition import PCA
+import multiprocessing as mp
+
+def load_data(file_path):
+    # Load the CSV file
+    data = pd.read_csv(file_path)
+    return data
+
+def calc_median_nonCNSL(read_depth):
+    # calculate the median of nonCNSL probes for each sample
+    non_cnsl_columns = [col for col in read_depth.columns if col.startswith("non_CNSL")]
+    read_depth['Non_CNSL_median'] = read_depth[non_cnsl_columns].median(axis=1)
+    return read_depth['Non_CNSL_median'] 
+
+def normalize_within_sample(read_depth, median):
+    cnsl_columns = [col for col in read_depth.columns if col.startswith("CNSL")]
+    estimate_cnv = pd.DataFrame()
+    # assuming cn=2 in non_CNSL regions
+    estimate_cnv[cnsl_columns] = 2* read_depth[cnsl_columns].div(median, axis=0)
+    return estimate_cnv
+
+def mean_center(estimate_cnv):
+    current_mean = estimate_cnv.mean()
+    mean_center_data = (estimate_cnv - current_mean)
+    return mean_center_data
+
+def PCA_normalize (mean_center_data):
+    # Step 1: PCA
+    pca = PCA()
+    pca_result = pca.fit_transform(mean_center_data)
+
+    # Step 2: Variance for each component
+    explained_variance = pca.explained_variance_
+
+    # Step 3: Calculate mean variance
+    mean_variance = np.mean(explained_variance)
+
+    # Step 4: Identify components to keep. Remove any principal component in which the data variance is greater than 0.7 times the mean variance over all components
+    threshold = 0.7 * mean_variance
+    # We want to remove components where the variance is >= threshold
+    num_components_to_keep = np.sum(explained_variance < threshold)
+
+    # Step 5: Remove the top principal components (by excluding those with variance >= threshold)
+    pca_result_removed = pca_result[:, :num_components_to_keep]  # Keep only components with explained variance < threshold
+
+    # Step 6: Reconstruct the data using the remaining components
+    reconstructed_data = np.dot(pca_result_removed, pca.components_[:num_components_to_keep])
+    # Example: creating column names based on your data
+    column_names = mean_center_data.columns
+    # Transform reconstructed_data into a DataFrame
+    reconstructed_df = pd.DataFrame(reconstructed_data, columns=column_names)
+    return reconstructed_df
+
+def probe_std (reconstructed_df, std_threshold):
+    std_devs = reconstructed_df.std()
+    drop_probe = std_devs[std_devs > std_threshold].index.tolist()
+    return std_devs, drop_probe
+
+def calc_zscore(reconstructed_df):
+    means = reconstructed_df.mean()
+    std_devs = reconstructed_df.std()
+    z_scores = (reconstructed_df - means) / std_devs
+    z_scores_df = pd.DataFrame(z_scores, columns=reconstructed_df.columns)
+    return z_scores_df
+
+def find_continuous_stretches(df, brk_index, five_prime, three_prime, drop_probe, brkp_threshold, elbow_threshold):
+    continuous_del_stretches = []
+    continuous_dup_stretches = []
+    # Extract relevant probe columns including the elbow and avoid using problematic probes        
+    probe_columns = [
+        f"CNSL_probe_{i}" for i in range(five_prime-1, three_prime + 2)
+        if f"CNSL_probe_{i}" not in drop_probe
+    ]
+
+    # loop through each sample
+    for idx in range(len(df)):
+        # extract values across breakpoint
+        breakpoint_probe = df.loc[idx, probe_columns]
+        # Check if all breakpoint_probe values are > threshold (duplication) 
+        if all(z >= brkp_threshold for z in breakpoint_probe[1:-1]):  # Continuous stretch for duplication
+            if breakpoint_probe[1] - breakpoint_probe[0] > elbow_threshold and breakpoint_probe[-2] - breakpoint_probe[-1] > elbow_threshold:  # check elbow
+                continuous_dup_stretches.append(idx)
+        # Check if all breakpoint_probe values < -threshold (deletion) 
+        elif all(z <= -brkp_threshold for z in breakpoint_probe[1:-1]):  # Continuous stretch for deletion
+            if breakpoint_probe[0] - breakpoint_probe[1] > elbow_threshold and breakpoint_probe[-1] - breakpoint_probe[-2] > elbow_threshold: # check elbow
+                continuous_del_stretches.append(idx)
+        
+    return brk_index, continuous_del_stretches, continuous_dup_stretches
+
+def find_continuous_stretches_helper(z_scores_df, brk_list, drop_probe, brk_threshold, elbow_threshold):
+    # Prepare arguments
+    find_stretch_args = [
+        (z_scores_df, brk_idx+1, brk_point[0], brk_point[1], drop_probe, brk_threshold, elbow_threshold)
+        for brk_idx, brk_point in enumerate(brk_list)]
+    # Use multiprocessing
+    mp.set_start_method("fork", force=True) # this is added to solve the attribute error in ipython
+    with mp.Pool(processes=10) as p:
+        results = p.starmap(find_continuous_stretches, find_stretch_args)
+    return results
+
+def calc_freq_ethnicity(df, brk_index, continuous_del_stretches, continuous_dup_stretches):
+    # Create dictionaries to store counts by ethnicity
+    deletion_count = {}
+    duplication_count = {}
+
+    # Ethnicity-based occurrence count
+    for idx in continuous_del_stretches:
+        ethnicity = df.loc[idx, "ethnicity"]
+        deletion_count[ethnicity] = deletion_count.get(ethnicity, 0) + 1
+
+    for idx in continuous_dup_stretches:
+        ethnicity = df.loc[idx, "ethnicity"]
+        duplication_count[ethnicity] = duplication_count.get(ethnicity, 0) + 1
+    
+    # Calculate total counts for each ethnicity
+    total_counts = df["ethnicity"].value_counts().to_dict()
+    deletion_count = {
+        ethnicity: deletion_count.get(ethnicity, 0) for ethnicity in total_counts
+    }
+    duplication_count = {
+        ethnicity: duplication_count.get(ethnicity, 0) for ethnicity in total_counts
+    }
+    # Calculate frequencies by dividing occurrences by total counts
+    deletion_frequency = {
+        ethnicity: deletion_count.get(ethnicity, 0) / total_counts[ethnicity]
+        for ethnicity in total_counts
+    }
+
+    duplication_frequency = {
+        ethnicity: duplication_count.get(ethnicity, 0) / total_counts[ethnicity]
+        for ethnicity in total_counts
+    }
+    return brk_index, deletion_count, duplication_count, deletion_frequency, duplication_frequency
+
+def calc_freq_ethnicity_helper(z_scores_df, results):
+    calc_freq_args = [
+        (z_scores_df, result[0], result[1], result[2])
+        for result in results]
+    # multiprocessing
+    mp.set_start_method("fork", force=True) # this is added to solve the attribute error in ipython
+    with mp.Pool(processes=10) as p:
+        frequency_res = p.starmap(calc_freq_ethnicity, calc_freq_args)
+    
+    return frequency_res
+
+
+# Main workflow
+def main(data_path, brk_list, std_threshold, brk_threshold, elbow_threshold):
+    # Step 1 read in csv file
+    read_depth = load_data(data_path)
+    # Step 2 calculate the median of the non-CNSL columns for each sample
+    median = calc_median_nonCNSL(read_depth)
+    # Step 3 calculate copy number using Non_CNSL_median (assuming cn=2) 
+    estimate_cnv = normalize_within_sample(read_depth, median)
+    # Step 4 calculate mean-centered data
+    mean_center_data = mean_center (estimate_cnv)
+    # Step 5 Normalize mean-centered data using PCA information
+    PCA_normalize_df = PCA_normalize(mean_center_data)
+    # Step 6 Calculate std and find problematic probes with large std
+    std_devs, drop_probe = probe_std (mean_center_data, std_threshold)
+    # Step 7: Calculate the z-score for each probe
+    z_scores_df = calc_zscore(PCA_normalize_df)
+    # Step 8: find deletions and duplications using hardcoded breakpoints,excluding problematic probes
+    results = find_continuous_stretches_helper(z_scores_df, brk_list, drop_probe, brk_threshold, elbow_threshold)
+    # Step 9: calculate deletions and duplications on a per-ethnicity basis
+    frequency_res = calc_freq_ethnicity_helper(read_depth, results)
+    # Print results
+    for summary in frequency_res:
+        print(f"  Breakpoints: {summary[0]}")
+        print(f"  Deletion counts: {summary[1]}")
+        print(f"  Duplication counts: {summary[2]}")
+        print(f"  Deletion frequency: {summary[3]}")
+        print(f"  Duplication frequency: {summary[4]}")
+        print("-" * 50)
+
+if __name__ == "__main__":
+    main("/Users/hangxue/Downloads/cnsl_data.csv", brk_list = [[32, 38], [27, 34], [20, 40], [10, 40]], std_threshold=0.5, brk_threshold=1, elbow_threshold=1)

@@ -1,0 +1,1 @@
+ Using NGS read depths across probes, this project analyzed copy number variations in specific gene regions. The txt file contains all codes to perform the copy number variation analysis. The results are in the report.pdf
